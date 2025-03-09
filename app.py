@@ -19,10 +19,21 @@ import glob
 from flask import after_this_request
 from pytube import YouTube
 import subprocess
+import winreg
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)  # 启用CORS支持
-socketio = SocketIO(app, cors_allowed_origins="*")  # 初始化SocketIO
+
+# 配置 Socket.IO
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    ping_timeout=5,
+    ping_interval=25,
+    logger=False,
+    engineio_logger=False
+)
 
 # 配置日志
 logging.basicConfig(
@@ -74,6 +85,21 @@ def extract_video_id(url):
         logger.error(f"提取视频ID时出错: {str(e)}")
         return None
 
+def get_system_proxy():
+    try:
+        reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Internet Settings')
+        proxy_enable, _ = winreg.QueryValueEx(reg_key, 'ProxyEnable')
+        if proxy_enable:
+            proxy_server, _ = winreg.QueryValueEx(reg_key, 'ProxyServer')
+            app.logger.info(f'系统代理已启用: {proxy_server}')
+            return f'http://{proxy_server}'
+        else:
+            app.logger.info('系统代理未启用')
+            return None
+    except Exception as e:
+        app.logger.error(f'获取系统代理设置失败: {str(e)}')
+        return None
+
 def get_video_info(url):
     """获取视频信息"""
     try:
@@ -85,17 +111,25 @@ def get_video_info(url):
             url = f'https://www.youtube.com/watch?v={video_id}'
             logger.info(f"转换Shorts URL为标准URL: {url}")
         
-        # 设置yt-dlp选项
+        # 获取系统代理设置
+        proxy = get_system_proxy()
+        if proxy:
+            os.environ['HTTP_PROXY'] = proxy
+            os.environ['HTTPS_PROXY'] = proxy
+            app.logger.info(f'使用系统代理: {proxy}')
+
+        # 设置yt-dlp选项，优化性能
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'format': '18/best',  # 优先使用format 18，这是一个稳定的格式
-            'socket_timeout': 30,
-            'retries': 10,
-            'fragment_retries': 10,
+            'format': 'best[ext=mp4]/best',  # 简化格式选择
+            'socket_timeout': 10,  # 减少超时时间
+            'retries': 3,
+            'fragment_retries': 3,
             'ignoreerrors': True,
             'noplaylist': True,
-            'extract_flat': False,
+            'extract_flat': True,  # 只获取基本信息
+            'skip_download': True,  # 跳过下载
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             }
@@ -106,64 +140,19 @@ def get_video_info(url):
             if not info:
                 logger.error("无法获取视频信息")
                 return None
-                
-            # 获取所有可用格式
-            available_formats = info.get('formats', [])
             
-            # 记录所有可用格式
-            logger.info("所有可用格式:")
-            for f in available_formats:
-                logger.info(f"格式: {f.get('format_id')} - {f.get('ext')} - {f.get('vcodec')} - {f.get('acodec')} - {f.get('height')}p - {f.get('tbr')}kbps")
-            
-            # 优先查找format 18
-            format_18 = next((f for f in available_formats if f.get('format_id') == '18'), None)
-            if format_18:
-                selected_formats = [{
-                    'format_id': '18',
-                    'ext': format_18.get('ext', 'mp4'),
-                    'height': format_18.get('height', 360),
-                    'width': format_18.get('width', 640),
-                    'filesize': format_18.get('filesize', 0) or 0,
-                    'vcodec': format_18.get('vcodec', ''),
-                    'acodec': format_18.get('acodec', ''),
-                    'tbr': format_18.get('tbr', 0) or 0,
-                    'type': 'video',
-                    'format_note': '360p MP4'
-                }]
-            else:
-                # 如果没有format 18，找出最佳的MP4格式
-                mp4_formats = [f for f in available_formats if f.get('ext') == 'mp4' and f.get('acodec') != 'none' and f.get('vcodec') != 'none']
-                if mp4_formats:
-                    best_mp4 = max(mp4_formats, key=lambda x: (x.get('height', 0) or 0, x.get('tbr', 0) or 0))
-                    selected_formats = [{
-                        'format_id': best_mp4['format_id'],
-                        'ext': 'mp4',
-                        'height': best_mp4.get('height', 0),
-                        'width': best_mp4.get('width', ''),
-                        'filesize': best_mp4.get('filesize', 0) or 0,
-                        'vcodec': best_mp4.get('vcodec', ''),
-                        'acodec': best_mp4.get('acodec', ''),
-                        'tbr': best_mp4.get('tbr', 0) or 0,
-                        'type': 'video',
-                        'format_note': f"{best_mp4.get('height', 0)}p MP4"
-                    }]
-                else:
-                    # 如果没有合适的MP4格式，使用任何可用的最佳格式
-                    selected_formats = [{
-                        'format_id': 'best',
-                        'ext': 'mp4',
-                        'type': 'video',
-                        'format_note': 'Best available'
-                    }]
-            
+            # 简化返回的信息
             return {
                 'id': info.get('id'),
                 'title': info.get('title'),
                 'thumbnail': info.get('thumbnail'),
                 'duration': info.get('duration'),
-                'view_count': info.get('view_count'),
-                'uploader': info.get('uploader'),
-                'formats': selected_formats
+                'formats': [{
+                    'format_id': 'best',
+                    'ext': 'mp4',
+                    'type': 'video',
+                    'format_note': 'Best available'
+                }]
             }
             
     except Exception as e:
@@ -179,24 +168,97 @@ def terms():
     return render_template('terms.html')
 
 @app.route('/get_video_info', methods=['POST'])
-def get_video_info_endpoint():
-    """获取视频信息的API端点"""
+def get_video_info():
     try:
         data = request.get_json()
-        url = data.get('url')
-        
-        if not url:
-            return jsonify({'error': '请提供视频URL'}), 400
-            
-        video_info = get_video_info(url)
-        if not video_info:
-            return jsonify({'error': '无法获取视频信息'}), 500
-            
-        return jsonify(video_info)
-        
+        url = data.get('url', '')
+        app.logger.info(f'获取视频信息 - URL: {url}')
+
+        # 提取视频ID
+        app.logger.info(f'正在提取视频ID，URL: {url}')
+        video_id = None
+        if 'shorts' in url.lower():
+            video_id = re.search(r'shorts/([^/?]+)', url)
+            if video_id:
+                video_id = video_id.group(1)
+                app.logger.info(f'从Shorts URL提取到视频ID: {video_id}')
+                url = f'https://www.youtube.com/watch?v={video_id}'
+                app.logger.info(f'转换Shorts URL为标准URL: {url}')
+
+        # 获取系统代理设置
+        proxy = get_system_proxy()
+        proxies = {}
+        if proxy:
+            proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            app.logger.info(f'使用系统代理: {proxy}')
+
+        try:
+            app.logger.info('开始提取视频信息...')
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br'
+            }
+
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+            app.logger.info(f'获取页面状态码: {response.status_code}')
+
+            if response.status_code == 200:
+                html = response.text
+                
+                # 提取视频标题
+                title_match = re.search(r'"title":"([^"]+)"', html)
+                title = title_match.group(1) if title_match else '未知标题'
+
+                # 提取视频时长
+                duration_match = re.search(r'"lengthSeconds":"(\d+)"', html)
+                duration = int(duration_match.group(1)) if duration_match else 0
+
+                # 提取视频缩略图
+                thumbnail_match = re.search(r'"thumbnails":\[{"url":"([^"]+)"', html)
+                thumbnail = thumbnail_match.group(1) if thumbnail_match else ''
+
+                # 提取视频描述
+                description_match = re.search(r'"description":{"simpleText":"([^"]+)"', html)
+                description = description_match.group(1) if description_match else ''
+
+                # 提取观看次数
+                view_count_match = re.search(r'"viewCount":"(\d+)"', html)
+                view_count = int(view_count_match.group(1)) if view_count_match else 0
+
+                # 提取作者信息
+                author_match = re.search(r'"author":"([^"]+)"', html)
+                author = author_match.group(1) if author_match else '未知作者'
+
+                app.logger.info('成功提取视频信息')
+                app.logger.info(f'视频标题: {title}')
+                app.logger.info(f'视频时长: {duration}秒')
+
+                return jsonify({
+                    'title': title,
+                    'duration': duration,
+                    'thumbnail': thumbnail,
+                    'description': description,
+                    'view_count': view_count,
+                    'author': author
+                })
+            else:
+                app.logger.error(f'获取视频页面失败: {response.status_code}')
+                return jsonify({'error': f'获取视频页面失败: {response.status_code}'}), 500
+
+        except Exception as e:
+            app.logger.error(f'获取视频信息失败: {str(e)}')
+            app.logger.exception('详细错误信息:')
+            return jsonify({'error': f'获取视频信息失败: {str(e)}'}), 500
+
     except Exception as e:
-        logger.error(f"获取视频信息时出错: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        app.logger.error(f'请求处理错误: {str(e)}')
+        app.logger.exception('详细错误信息:')
+        return jsonify({'error': f'请求处理失败: {str(e)}'}), 500
 
 @app.route('/download', methods=['POST'])
 def download_video():
@@ -225,7 +287,6 @@ def download_video():
                     downloaded = d.get('downloaded_bytes', 0)
                     if total > 0:
                         percentage = (downloaded / total) * 100
-                        # 通过WebSocket发送进度信息
                         socketio.emit('download_progress', {
                             'percentage': round(percentage, 1),
                             'downloaded': downloaded,
@@ -239,23 +300,19 @@ def download_video():
         
         # 使用yt-dlp下载
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/18/best',  # 更全面的格式选择
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': output_template,
-            'merge_output_format': 'mp4',  # 确保输出为MP4格式
+            'merge_output_format': 'mp4',
             'quiet': False,
             'no_warnings': False,
-            'progress_hooks': [progress_hook],  # 添加进度钩子
+            'progress_hooks': [progress_hook],
             'verbose': True,
             'retries': 3,
             'fragment_retries': 3,
             'socket_timeout': 30,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            },
-            'postprocessors': [{
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': 'mp4',  # 使用FFmpeg确保转换为MP4
-            }]
+            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -309,22 +366,27 @@ def download_video():
         logger.error(f"请求处理失败: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    """处理文件下载请求"""
-    try:
-        logger.info(f"请求下载文件: {filename}")
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        downloads_dir = os.path.join(current_dir, 'downloads')
-        return send_from_directory(downloads_dir, filename, as_attachment=True)
-    except Exception as e:
-        logger.error(f"文件下载失败: {str(e)}")
-        return jsonify({'error': '文件下载失败'}), 500
-
 @app.route('/static/<path:filename>')
 def serve_static(filename):
     """提供静态文件服务"""
     return send_from_directory('static', filename)
+
+@app.route('/test_connection', methods=['GET'])
+def test_connection():
+    try:
+        # 测试与 YouTube 的连接
+        response = requests.get('https://www.youtube.com', timeout=10)
+        app.logger.info(f'YouTube 连接状态码: {response.status_code}')
+        return jsonify({
+            'status': 'success',
+            'youtube_status': response.status_code
+        })
+    except Exception as e:
+        app.logger.error(f'连接测试失败: {str(e)}')
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     # 确保下载目录存在
@@ -333,5 +395,16 @@ if __name__ == '__main__':
     # 确保静态文件目录存在
     if not os.path.exists('static'):
         os.makedirs('static')
-    # 使用socketio运行应用
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    
+    # 设置环境变量禁用代理
+    os.environ['NO_PROXY'] = 'localhost,127.0.0.1'
+    os.environ['no_proxy'] = 'localhost,127.0.0.1'
+    
+    # 禁用所有代理设置
+    os.environ.pop('HTTP_PROXY', None)
+    os.environ.pop('HTTPS_PROXY', None)
+    os.environ.pop('http_proxy', None)
+    os.environ.pop('https_proxy', None)
+    
+    # 使用普通的 Flask 运行方式
+    app.run(host='localhost', port=3000, debug=True, threaded=True)
