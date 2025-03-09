@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>芝士猫 YouTube Shorts 高清下载</title>
+    <!-- 标准图标 -->
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <!-- iOS图标 -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/favicon-180.png">
+    <!-- Android图标 -->
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/favicon-192.png">
+    <!-- Windows磁贴图标 -->
+    <meta name="msapplication-TileImage" content="/static/favicon-192.png">
+    <meta name="msapplication-TileColor" content="#2196f3">
+    <!-- Safari固定标签页图标 -->
+    <link rel="mask-icon" href="/static/favicon.svg" color="#2196f3">
+    <!-- 主题颜色 -->
+    <meta name="theme-color" content="#2196f3">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        #debug {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .debug-line {
+            margin: 2px 0;
+        }
+        .video-thumbnail {
+            max-width: 320px;
+            margin: 0 auto;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <div class="min-h-screen flex flex-col items-center justify-start pt-10 px-4">
+        <h1 class="text-3xl font-bold text-gray-900 mb-2">芝士猫 YouTube Shorts 高清下载</h1>
+        <p class="text-gray-600 mb-8">免费下载 YouTube Shorts 视频</p>
+        
+        <div class="w-full max-w-2xl">
+            <!-- 输入框和图标 -->
+            <div class="relative flex items-center mb-4">
+                <img src="/static/favicon.png" alt="芝士猫图标" class="w-8 h-8 mr-2">
+                <input type="text" 
+                       id="url" 
+                       class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent pr-12"
+                       placeholder="https://youtube.com/shorts/..."
+                >
+                <button onclick="clearInput()" 
+                        class="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                    ×
+                </button>
+            </div>
+            
+            <button onclick="getVideoInfo()" 
+                    id="downloadBtn"
+                    class="w-full mt-4 bg-blue-500 hover:bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg transition duration-200 ease-in-out transform hover:scale-[1.02]"
+            >
+                获取下载链接
+            </button>
+
+            <!-- 加载动画 -->
+            <div id="loading" class="hidden mt-8 flex justify-center">
+                <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+
+            <!-- 错误提示 -->
+            <div id="error" class="hidden mt-4 p-4 bg-red-100 border-l-4 border-red-500 text-red-700"></div>
+
+            <!-- 下载区域 -->
+            <div id="downloadArea" class="hidden mt-8">
+                <h3 class="text-lg font-semibold mb-4">下载视频</h3>
+                
+                <!-- 视频标题 -->
+                <div id="videoInfo"></div>
+                
+                <!-- 视频缩略图 -->
+                <div id="thumbnailContainer" class="video-thumbnail mb-4 hidden">
+                    <img id="thumbnail" src="" alt="视频缩略图" class="w-full h-auto">
+                </div>
+
+                <!-- 下载按钮组 -->
+                <div class="mt-4">
+                    <button onclick="downloadVideo('video')" 
+                            id="downloadVideoBtn"
+                            class="w-full bg-blue-500 text-white py-3 px-4 rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 transition-colors text-sm"
+                    >
+                        下载视频
+                    </button>
+                </div>
+                
+                <!-- 下载进度条 -->
+                <div id="progressContainer" class="hidden mt-4">
+                    <div class="w-full bg-gray-200 rounded-full h-2.5">
+                        <div id="progressBar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+                    </div>
+                    <div id="progressText" class="text-sm text-gray-600 mt-2 text-center">0%</div>
+                </div>
+                
+                <!-- 下载状态 -->
+                <div id="downloadStatus" class="mt-4"></div>
+            </div>
+
+            <!-- 下载状态 -->
+            <div id="downloadStatusOuter" class="hidden mt-4 p-4 bg-blue-100 text-blue-700 rounded-lg"></div>
+
+            <!-- 调试信息 -->
+            <div id="debug" class="mt-4 p-4 bg-gray-100 rounded-lg text-sm font-mono text-gray-700"></div>
+            
+            <!-- 使用条款 -->
+            <div class="text-center mt-8 mb-4 text-gray-600 text-sm">
+                使用我们的服务即表示您接受我们的<a href="/terms" target="_blank" class="text-red-500 hover:text-red-600">使用条款</a>
+                <p class="mt-2">记得收藏芝士猫，问题反馈与建议：imluluj8@gmail.com</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentVideoUrl = '';
+        let downloadInProgress = false;
+        let currentVideoFormats = [];
+        let socket = null;
+
+        // 调试信息显示
+        function showDebug(message) {
+            const debugDiv = document.getElementById('debug');
+            const timestamp = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.className = 'debug-line';
+            line.textContent = `[${timestamp}] ${message}`;
+            debugDiv.appendChild(line);
+            debugDiv.scrollTop = debugDiv.scrollHeight;
+            console.log(`[DEBUG] ${message}`);
+        }
+
+        // 清除输入
+        function clearInput() {
+            document.getElementById('url').value = '';
+            hideError();
+            hideDownloadArea();
+            currentVideoUrl = '';
+            downloadInProgress = false;
+            showDebug('清除输入');
+        }
+
+        // 显示加载动画
+        function showLoading() {
+            document.getElementById('loading').classList.remove('hidden');
+            document.getElementById('downloadBtn').disabled = true;
+            document.getElementById('downloadBtn').classList.add('opacity-50');
+            showDebug('显示加载动画');
+        }
+
+        // 隐藏加载动画
+        function hideLoading() {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('downloadBtn').disabled = false;
+            document.getElementById('downloadBtn').classList.remove('opacity-50');
+            showDebug('隐藏加载动画');
+        }
+
+        // 显示错误信息
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.classList.remove('hidden');
+            showDebug(`错误: ${message}`);
+        }
+
+        // 隐藏错误信息
+        function hideError() {
+            document.getElementById('error').classList.add('hidden');
+            showDebug('隐藏错误信息');
+        }
+
+        // 显示下载区域
+        function showDownloadArea(data) {
+            const downloadArea = document.getElementById('downloadArea');
+            const videoInfo = document.getElementById('videoInfo');
+            const thumbnailContainer = document.getElementById('thumbnailContainer');
+            const thumbnail = document.getElementById('thumbnail');
+            const downloadStatus = document.getElementById('downloadStatus');
+            
+            // 设置视频信息
+            updateVideoInfo(data);
+            
+            // 设置缩略图
+            if (data.thumbnail) {
+                thumbnail.src = data.thumbnail;
+                thumbnailContainer.classList.remove('hidden');
+            } else {
+                thumbnailContainer.classList.add('hidden');
+            }
+            
+            // 清空下载状态
+            downloadStatus.textContent = '';
+            downloadStatus.className = 'mt-4';
+            downloadStatus.classList.remove('hidden');
+            
+            // 启用下载按钮
+            document.getElementById('downloadBtn').disabled = false;
+            
+            // 显示下载区域
+            downloadArea.classList.remove('hidden');
+        }
+
+        // 隐藏下载区域
+        function hideDownloadArea() {
+            const downloadArea = document.getElementById('downloadArea');
+            const downloadBtn = document.getElementById('downloadBtn');
+            const downloadStatus = document.getElementById('downloadStatus');
+            
+            downloadArea.classList.add('hidden');
+            downloadBtn.disabled = true;
+            downloadStatus.textContent = '';
+            downloadStatus.className = 'mt-4';
+            downloadStatus.classList.add('hidden');
+        }
+
+        // 获取视频信息
+        async function getVideoInfo() {
+            const videoUrl = document.getElementById('url').value.trim();
+            const downloadBtn = document.getElementById('downloadBtn');
+            const downloadStatus = document.getElementById('downloadStatus');
+            
+            if (!videoUrl) {
+                showError('请输入视频链接');
+                return;
+            }
+            
+            try {
+                hideError();
+                hideDownloadArea();
+                showLoading();
+                
+                const response = await fetch('/get_video_info', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: videoUrl })
+                });
+                
+                const data = await response.json();
+                showDebug(`获取到视频信息: ${JSON.stringify(data)}`);
+                
+                if (!response.ok) {
+                    throw new Error(data.error || '获取视频信息失败');
+                }
+                
+                // 设置当前视频URL和格式
+                currentVideoUrl = videoUrl;
+                currentVideoFormats = data.formats || [];
+                
+                // 更新视频信息显示
+                showDownloadArea(data);
+                
+                showDebug('视频信息获取成功');
+                
+            } catch (error) {
+                showError(error.message);
+                showDebug(`获取视频信息出错: ${error.message}`);
+                hideDownloadArea();
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // 格式化时长
+        function formatDuration(seconds) {
+            if (!seconds) return '未知';
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const remainingSeconds = Math.floor(seconds % 60);
+            
+            if (hours > 0) {
+                return `${hours}:${padZero(minutes)}:${padZero(remainingSeconds)}`;
+            }
+            return `${minutes}:${padZero(remainingSeconds)}`;
+        }
+        
+        // 格式化数字（添加千位分隔符）
+        function formatNumber(num) {
+            if (!num) return '未知';
+            return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+        
+        // 补零
+        function padZero(num) {
+            return num.toString().padStart(2, '0');
+        }
+
+        // 更新视频信息显示
+        function updateVideoInfo(info) {
+            const videoInfo = document.getElementById('videoInfo');
+            const quality = document.getElementById('quality');
+            const downloadBtn = document.getElementById('downloadBtn');
+            const downloadStatus = document.getElementById('downloadStatus');
+            
+            if (!info || !info.formats) {
+                videoInfo.innerHTML = '<p class="text-red-500">无法获取视频信息</p>';
+                quality.innerHTML = '<option value="">没有可用的格式</option>';
+                downloadBtn.disabled = true;
+                return;
+            }
+            
+            // 显示视频信息
+            let html = `
+                <div class="flex flex-col md:flex-row items-start gap-4">
+                    <div class="w-full md:w-1/3">
+                        <img src="${info.thumbnail}" alt="${info.title}" class="w-full rounded-lg shadow-lg">
+                    </div>
+                    <div class="w-full md:w-2/3">
+                        <h2 class="text-xl font-bold mb-2">${info.title}</h2>
+                        <p class="text-gray-600 mb-2">上传者：${info.uploader || '未知'}</p>
+                        <p class="text-gray-600 mb-2">时长：${formatDuration(info.duration)}</p>
+                        <p class="text-gray-600 mb-2">观看次数：${formatNumber(info.view_count)}</p>
+                    </div>
+                </div>
+            `;
+            videoInfo.innerHTML = html;
+            
+            // 启用下载按钮
+            downloadBtn.disabled = false;
+            
+            // 清除之前的下载状态
+            downloadStatus.innerHTML = '';
+            downloadStatus.className = 'hidden';
+        }
+
+        // 初始化WebSocket连接
+        function initializeSocket() {
+            if (!socket) {
+                socket = io();
+                
+                socket.on('connect', () => {
+                    showDebug('WebSocket已连接');
+                });
+                
+                socket.on('disconnect', () => {
+                    showDebug('WebSocket已断开');
+                });
+                
+                socket.on('download_progress', (data) => {
+                    if (downloadInProgress) {
+                        updateProgress(data);
+                    }
+                });
+            }
+        }
+
+        // 更新进度条
+        function updateProgress(data) {
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const percentage = data.percentage;
+            
+            progressBar.style.width = `${percentage}%`;
+            
+            // 格式化下载速度
+            const speed = formatSpeed(data.speed);
+            const downloaded = formatSize(data.downloaded);
+            const total = formatSize(data.total);
+            const eta = formatTime(data.eta);
+            
+            progressText.innerHTML = `${percentage.toFixed(1)}% - ${downloaded}/${total} - ${speed}/s - 剩余时间: ${eta}`;
+        }
+
+        // 格式化文件大小
+        function formatSize(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+        }
+
+        // 格式化下载速度
+        function formatSpeed(bytesPerSecond) {
+            return formatSize(bytesPerSecond);
+        }
+
+        // 格式化剩余时间
+        function formatTime(seconds) {
+            if (!seconds) return '未知';
+            if (seconds < 60) return `${seconds}秒`;
+            const minutes = Math.floor(seconds / 60);
+            seconds = seconds % 60;
+            if (minutes < 60) return `${minutes}分${seconds}秒`;
+            const hours = Math.floor(minutes / 60);
+            minutes = minutes % 60;
+            return `${hours}时${minutes}分${seconds}秒`;
+        }
+
+        // 下载视频
+        async function downloadVideo(type) {
+            if (downloadInProgress) {
+                showDebug('下载正在进行中，请等待...');
+                return;
+            }
+
+            try {
+                downloadInProgress = true;
+                const downloadStatus = document.getElementById('downloadStatus');
+                const progressContainer = document.getElementById('progressContainer');
+                const progressBar = document.getElementById('progressBar');
+                const progressText = document.getElementById('progressText');
+                const downloadBtn = document.getElementById('downloadVideoBtn');
+                
+                // 确保WebSocket已连接
+                initializeSocket();
+                
+                // 显示进度条
+                progressContainer.classList.remove('hidden');
+                progressBar.style.width = '0%';
+                progressText.textContent = '准备下载...';
+                downloadBtn.disabled = true;
+                downloadBtn.classList.add('opacity-50');
+                
+                // 根据类型找到对应的格式
+                const format = currentVideoFormats.find(f => f.type === type);
+                if (!format) {
+                    throw new Error(`未找到${type === 'video' ? '视频' : '音频'}格式`);
+                }
+
+                showDebug(`开始下载 ${format.format_note}`);
+                
+                const response = await fetch('/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: currentVideoUrl,
+                        format_id: format.format_id
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('下载失败');
+                }
+
+                // 获取文件名
+                const contentDisposition = response.headers.get('content-disposition');
+                let filename = '视频.mp4';
+                if (contentDisposition) {
+                    const matches = /filename\*?=(?:utf-8'')?([^;]*)/.exec(contentDisposition);
+                    if (matches?.[1]) {
+                        filename = decodeURIComponent(matches[1].replace(/['"]/g, ''));
+                    }
+                }
+
+                // 创建下载链接
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+
+                // 更新UI显示下载完成
+                progressBar.style.width = '100%';
+                progressText.textContent = '下载完成！';
+                downloadStatus.textContent = '下载完成！';
+                downloadStatus.className = 'mt-4 text-green-600';
+                showDebug('下载完成');
+
+            } catch (error) {
+                console.error('下载出错:', error);
+                const downloadStatus = document.getElementById('downloadStatus');
+                downloadStatus.textContent = `下载失败: ${error.message}`;
+                downloadStatus.className = 'mt-4 text-red-600';
+                showDebug(`下载失败: ${error.message}`);
+            } finally {
+                downloadInProgress = false;
+                document.getElementById('downloadVideoBtn').disabled = false;
+                document.getElementById('downloadVideoBtn').classList.remove('opacity-50');
+            }
+        }
+
+        // 监听回车键
+        document.getElementById('url').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                showDebug('按下回车键');
+                getVideoInfo();
+            }
+        });
+
+        // 页面加载完成后初始化WebSocket
+        document.addEventListener('DOMContentLoaded', () => {
+            initializeSocket();
+        });
+    </script>
+</body>
+</html>
